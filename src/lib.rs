@@ -22,6 +22,12 @@ use embedded_sensors_hal_async::sensor;
 mod device;
 pub use crate::device::*;
 
+pub mod convert;
+pub mod units;
+
+#[cfg(test)]
+mod core_tests;
+
 /// Maximum register data size in bytes (energy registers are 32-bit = 4 bytes).
 const LARGEST_REG_SIZE_BYTES: usize = 4;
 
