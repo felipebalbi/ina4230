@@ -321,18 +321,8 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
         Ok(Flags {
             conversion_ready: f.cvrf(),
             math_overflow: f.ovf(),
-            energy_overflow: [
-                f.energyof_ch1(),
-                f.energyof_ch2(),
-                f.energyof_ch3(),
-                f.energyof_ch4(),
-            ],
-            limit_alerts: [
-                f.limit1_alert(),
-                f.limit2_alert(),
-                f.limit3_alert(),
-                f.limit4_alert(),
-            ],
+            energy_overflow: [f.energyof_ch1(), f.energyof_ch2(), f.energyof_ch3(), f.energyof_ch4()],
+            limit_alerts: [f.limit1_alert(), f.limit2_alert(), f.limit3_alert(), f.limit4_alert()],
         })
     }
 
@@ -341,11 +331,7 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
     /// # Errors
     ///
     /// Returns [`Ina4230Error::Bus`] if an I²C bus error occurs.
-    pub async fn set_channel_active(
-        &mut self,
-        channel: Channel,
-        active: bool,
-    ) -> Result<(), Ina4230Error<I2c::Error>> {
+    pub async fn set_channel_active(&mut self, channel: Channel, active: bool) -> Result<(), Ina4230Error<I2c::Error>> {
         self.device
             .config_1()
             .modify_async(|w| {
@@ -399,10 +385,7 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
     /// # Errors
     ///
     /// Returns [`Ina4230Error::Bus`] if an I²C bus error occurs.
-    pub async fn calibrate_all(
-        &mut self,
-        calibrations: [Calibration; 4],
-    ) -> Result<(), Ina4230Error<I2c::Error>> {
+    pub async fn calibrate_all(&mut self, calibrations: [Calibration; 4]) -> Result<(), Ina4230Error<I2c::Error>> {
         self.device
             .config_2()
             .modify_async(|w| {

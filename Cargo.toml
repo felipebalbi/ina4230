@@ -10,7 +10,8 @@ categories = ["embedded", "hardware-support", "no-std"]
 documentation = "https://docs.rs/ina4230"
 include = ["/**/*.rs", "/Cargo.toml", "/README.md", "/LICENSE", "/INA4230.ddsl"]
 edition = "2024"
-rust-version = "1.88"
+# Bounded by device-driver 2.1, which requires 1.94.
+rust-version = "1.94"
 
 [dependencies]
 device-driver = "2.1.0"

@@ -11,12 +11,11 @@
 use proptest::prelude::*;
 
 use ina4230::convert::{
-    channel_bit, decode_bus_voltage, decode_current, decode_energy, decode_power, decode_shunt_voltage,
-    set_channel_bit,
+    channel_bit, decode_bus_voltage, decode_current, decode_energy, decode_power, decode_shunt_voltage, set_channel_bit,
 };
 use ina4230::units::{
-    AdcRange, AddrPinState, Address, AddressPins, Calibration, CalibrationError, Channel, CurrentLsb,
-    ShuntCal, ShuntResistance,
+    AdcRange, AddrPinState, Address, AddressPins, Calibration, CalibrationError, Channel, CurrentLsb, ShuntCal,
+    ShuntResistance,
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -323,8 +322,14 @@ fn decode_shunt_voltage_exhaustive() {
     }
 
     // Two's complement is lopsided: one more negative code than positive.
-    assert_eq!(decode_shunt_voltage(i16::MIN, AdcRange::Range0).as_nanovolts(), -81_920_000);
-    assert_eq!(decode_shunt_voltage(i16::MAX, AdcRange::Range0).as_nanovolts(), 81_917_500);
+    assert_eq!(
+        decode_shunt_voltage(i16::MIN, AdcRange::Range0).as_nanovolts(),
+        -81_920_000
+    );
+    assert_eq!(
+        decode_shunt_voltage(i16::MAX, AdcRange::Range0).as_nanovolts(),
+        81_917_500
+    );
 }
 
 // ── Properties ────────────────────────────────────────────────────────────────

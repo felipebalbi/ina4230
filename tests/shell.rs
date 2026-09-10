@@ -9,8 +9,8 @@
 use embedded_hal_mock::eh1::i2c::{Mock, Transaction};
 
 use ina4230::{
-    AdcRange, AddrPinState, AddressPins, Calibration, Channel, CurrentSensor, EnergySensor, Ina4230,
-    Ina4230Error, CurrentLsb, PowerSensor, ShuntResistance, VoltageSensor,
+    AdcRange, AddrPinState, AddressPins, Calibration, Channel, CurrentLsb, CurrentSensor, EnergySensor, Ina4230,
+    Ina4230Error, PowerSensor, ShuntResistance, VoltageSensor,
 };
 
 /// Address for the default strapping, A0 = A1 = GND.
@@ -110,7 +110,10 @@ async fn measurement_registers_use_the_right_offsets() {
     dev.calibrate(Channel::Ch3, cal).await.unwrap();
 
     // Values are the datasheet Table 8-3 vectors.
-    assert_eq!(dev.shunt_voltage(Channel::Ch3).await.unwrap().as_nanovolts(), 48_000_000);
+    assert_eq!(
+        dev.shunt_voltage(Channel::Ch3).await.unwrap().as_nanovolts(),
+        48_000_000
+    );
     assert_eq!(dev.current(Channel::Ch3).await.unwrap().as_nanoamps(), 6_000_000_000);
     assert_eq!(dev.power(Channel::Ch3).await.unwrap().as_nanowatts(), 72_000_000_000);
     assert_eq!(

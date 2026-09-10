@@ -363,8 +363,7 @@ impl Calibration {
         /// `0.00512` scaled by `1e15` to convert nA × µΩ into A × Ω.
         const NUMERATOR: u64 = 5_120_000_000_000;
 
-        let divisor =
-            current_lsb.as_nanoamps() as u64 * shunt.as_microohms() as u64 * adc_range.shunt_cal_divisor();
+        let divisor = current_lsb.as_nanoamps() as u64 * shunt.as_microohms() as u64 * adc_range.shunt_cal_divisor();
 
         // Round to nearest. `divisor` is non-zero, so this cannot trap.
         let value = (NUMERATOR + divisor / 2) / divisor;

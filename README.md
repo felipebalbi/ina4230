@@ -263,7 +263,7 @@ register layer, but have no high-level API yet:
   (1 sample, 1.1 ms conversion times, continuous shunt and bus) are used.
 - **Energy accumulator reset** (`CONFIG2.ACC_RST`), which also clears the
   energy overflow flags.
-- **SMBus Alert Response** (address `0b0001100`) and **General Call reset**
+- **`SMBus` Alert Response** (address `0b0001100`) and **General Call reset**
   (`0x00`, `0x06`), both supported by the device.
 
 The `FLAGS` register already exposes the four alert-limit bits via
@@ -282,7 +282,7 @@ CI verifies that the committed file matches the generator output.
 
 ## MSRV
 
-Rust `1.88` and up.
+Rust `1.94` and up, bounded by `device-driver` 2.1.
 
 ## License
 
