@@ -1,22 +1,47 @@
 # INA4230 Rust Device Driver
 
 A `#[no_std]` platform-agnostic driver for the [INA4230](https://www.ti.com/lit/ds/symlink/ina4230.pdf)
-quad-channel power and energy sense monitor, based on the [`embedded-hal`](https://docs.rs/embedded-hal) traits.
+48 V quad-channel current, voltage, power, and energy monitor, based on the
+[`embedded-hal`](https://docs.rs/embedded-hal) traits.
 
-Higher-level measurement APIs are built on the [embedded-sensors](https://github.com/OpenDevicePartnership/embedded-sensors)
-async sensor traits (`VoltageSensor`, `CurrentSensor`, `PowerSensor`, `EnergySensor`).
+## Design
+
+The driver is split into a pure core and a thin shell.
+
+**`units` and `convert`** hold every physical quantity, the validated
+calibration inputs, and all the register decoding. They have no bus, no
+`async`, no HAL dependency, and no floating-point arithmetic, so they build and
+test on the host as readily as on the target. This is where the thinking lives,
+and where the tests are.
+
+**`Ina4230`** is the shell. Each method moves bytes to or from the device and
+hands them to a pure function. It contains no arithmetic.
+
+Measurements are returned as newtypes over integers, in whichever unit keeps
+the conversion from the raw register *exact*:
+
+| Type           | Unit | Rendering methods                    |
+| -------------- | ---- | ------------------------------------ |
+| `ShuntVoltage` | nV   | `to_millivolts`                      |
+| `BusVoltage`   | µV   | `to_millivolts`, `to_volts`          |
+| `Current`      | nA   | `to_milliamps`, `to_amps`            |
+| `Power`        | nW   | `to_milliwatts`, `to_watts`          |
+| `Energy`       | nJ   | `to_millijoules`, `to_joules`        |
+
+`f32` appears only in those `to_*` methods. They are for display; do arithmetic
+on the integer accessors (`as_nanovolts`, `as_microamps`, and friends), which
+are lossless.
 
 ## Features
 
-- Full register coverage via pre-generated `src/device.rs` (generated from `INA4230.toml` using `device-driver-cli`)
+- Full register coverage via a pre-generated `src/device.rs`, built from
+  `INA4230.ddsl` with `device-driver-cli` and checked in sync by CI
 - Async-first I²C interface (`embedded-hal-async`)
-- Four independent measurement channels (bus voltage, shunt voltage, current, power, energy)
-- Per-channel calibration with independent shunt resistor, current range, and ADC range
-- ADC range selection (±81.92 mV or ±20.48 mV full scale) written to hardware on calibration
-- Channel enable/disable support
-- INA4230-specific error variants (`NotCalibrated`, `MathOverflow`, `EnergyOverflow`)
+- Four independent measurement channels (bus voltage, shunt voltage, current,
+  power, energy)
+- Per-channel calibration with independent shunt resistor, current resolution,
+  and ADC range
 - Optional `defmt` logging support
-- `no_std` compatible
 
 ## Usage
 
@@ -27,207 +52,237 @@ embedded-hal-async = "1"
 ```
 
 ```rust,ignore
-use ina4230::{AddrPinState, AdcRange, Channel, Ina4230};
+use ina4230::{
+    AdcRange, AddrPinState, AddressPins, Calibration, Channel, CurrentLsb,
+    CurrentSensor, Ina4230, ShuntResistance, VoltageSensor,
+};
 
 // i2c implements embedded_hal_async::i2c::I2c
-// AddrPinState selects the I²C address via A0 and A1 pin strapping on the device
-let mut sensor = Ina4230::new(i2c, AddrPinState::Gnd, AddrPinState::Gnd);
+let mut sensor = Ina4230::new(i2c, AddressPins {
+    a0: AddrPinState::Gnd,
+    a1: AddrPinState::Gnd,
+});
 
-// Reset, then calibrate each channel before taking measurements
+// Calibration is validated up front, away from the bus.
+let cal = Calibration::new(
+    CurrentLsb::from_nanoamps(500_000)?,      // 500 µA/LSB
+    ShuntResistance::from_microohms(8_000)?,  // 8 mΩ
+    AdcRange::Range0,
+)?;
+
 sensor.reset().await?;
-sensor.calibrate(Channel::Ch1, CURRENT_LSB_CH1, SHUNT_OHMS_CH1, AdcRange::Range0).await?;
+sensor.calibrate(Channel::Ch1, cal).await?;
 
-// Wait for conversion
-while !sensor.conversion_ready().await? {}
+// Wait for a conversion. See the note on reading flags below.
+while !sensor.read_flags().await?.conversion_ready() {}
 
-// Read channel 1
-let vbus_mv = sensor.bus_voltage(Channel::Ch1).await?;
-let ima      = sensor.current(Channel::Ch1).await?;
-let pmw      = sensor.power(Channel::Ch1).await?;
+let bus = sensor.bus_voltage(Channel::Ch1).await?;
+let current = sensor.current(Channel::Ch1).await?;
+
+defmt::info!("{} mV, {} mA", bus.to_millivolts(), current.to_milliamps());
 ```
 
 ## Configuration
 
-Before taking measurements, two hardware-specific parameters must be set per channel.
+Two hardware-specific parameters are needed per channel, plus a choice of ADC
+range. All three are checked once, when the `Calibration` is built; nothing
+downstream re-checks them.
 
-### Shunt Resistor Value
+### Shunt resistance
 
-Set `SHUNT_OHMS_CHx` to the resistance of the shunt resistor fitted on that channel, in ohms:
-
-```rust
-const SHUNT_OHMS_CH1: f32 = 0.010;  // 10 mΩ shunt on channel 1
-```
-
-Use a precision resistor (0.1% tolerance or better) for accurate results.
-For very low value shunts, use Kelvin (4-wire) connections to eliminate
-lead resistance errors.
-
-### Current Resolution
-
-`CURRENT_LSB` determines the resolution of the current measurement. A smaller
-value gives finer resolution but a lower full-scale range; a larger value gives
-a wider range but coarser resolution. The current register is 16-bit signed,
-giving 32767 steps above zero.
-
-Set `MAX_CURRENT_CHx` to the maximum current you expect on that channel — the
-driver calculates the optimal `CURRENT_LSB` automatically:
+The resistance of the shunt fitted on that channel, in microohms:
 
 ```rust
-// Example: expecting up to 100 mA on channel 1
-const MAX_CURRENT_CH1: f32 = 0.1;            // amps
-const CURRENT_LSB_CH1: f32 = MAX_CURRENT_CH1 / 32767.0;  // ~3.05 µA/LSB
+# use ina4230::ShuntResistance;
+let shunt = ShuntResistance::from_microohms(8_000)?; // 8 mΩ
+# Ok::<(), ina4230::CalibrationError>(())
 ```
 
-The driver uses `CURRENT_LSB` to compute the `SHUNT_CAL` register value
-written during `calibrate()`:
+Use a precision resistor (0.1% tolerance or better). For very low values, use
+Kelvin (4-wire) connections to eliminate lead resistance errors.
 
-```text
-SHUNT_CAL = 0.00512 / (CURRENT_LSB × R_SHUNT)
+### Current resolution
+
+`CURRENT_LSB` sets the resolution of the current measurement. Smaller gives
+finer resolution and a lower full-scale range; larger gives a wider range and
+coarser resolution.
+
+Datasheet Equation 2 gives the minimum as `MAX_CURRENT / 2^15`:
+
+```rust
+# use ina4230::CurrentLsb;
+// For a 10 A maximum: 305_176 nA/LSB.
+let minimum = CurrentLsb::min_for_max_current(10_000_000_000)?;
+# Ok::<(), ina4230::CalibrationError>(())
 ```
 
-And to convert the raw current register reading back to milliamperes:
+That is a floor, not a recommendation. Equation 2 divides by 2^15 = 32768 while
+the `CURRENT` register saturates at 32767, so the minimum lands about 0.003%
+below the requested full scale. The datasheet expects you to round up to a
+convenient number — its worked example takes a 305.17578 µA minimum for 10 A
+and uses 500 µA — and permits up to eight times the minimum before resolution
+suffers. Rounding up also closes the gap.
 
-```text
-Current [mA] = raw × CURRENT_LSB × 1000
-```
-
-If `MAX_CURRENT_CHx` is set too low, the current register will saturate and
-readings will be clamped. If set too high, resolution will be unnecessarily
-coarse.
-
-### ADC Range
-
-The INA4230 supports two shunt input voltage ranges, configured via `AdcRange`:
+### ADC range
 
 | `AdcRange`         | Full-scale range | LSB    |
 | ------------------ | ---------------- | ------ |
 | `Range0` (default) | ±81.92 mV        | 2.5 µV |
 | `Range1`           | ±20.48 mV        | 625 nV |
 
-`Range0` is the default and suits most applications. Use `Range1` for higher
-resolution when measuring small currents through a large shunt resistor.
-
-When using `Range1`, the `SHUNT_CAL` register value is automatically divided
-by 4, the shunt voltage LSB is adjusted to 625 nV, and `CONFIG2.RANGE` is
-updated in hardware:
-
-```text
-Range0: SHUNT_CAL = 0.00512 / (CURRENT_LSB × R_SHUNT)
-Range1: SHUNT_CAL = 0.00512 / (CURRENT_LSB × R_SHUNT) / 4
-```
+`Range0` suits most applications. Use `Range1` for higher resolution when
+measuring small currents through a large shunt. Selecting `Range1` divides
+`SHUNT_CAL` by 4 and adjusts the shunt LSB automatically; `CONFIG2.RANGE` is
+written to hardware when the channel is calibrated.
 
 ### Calibration
 
-The calibration register serves two purposes: it provides the device with
-the shunt resistor value used to calculate current from the measured
-differential voltage, and it sets the resolution of the current and power
-registers through the `CURRENT_LSB` and `Power_LSB` values.
+The calibration register tells the device the shunt value used to derive
+current from the measured differential voltage, and sets the resolution of the
+current, power, and energy registers.
 
-Call `calibrate()` before taking current, power, or energy measurements.
-Each channel is calibrated independently:
-
-```rust,ignore
-sensor.calibrate(Channel::Ch1, CURRENT_LSB_CH1, SHUNT_OHMS_CH1, AdcRange::Range0).await?;
-sensor.calibrate(Channel::Ch2, CURRENT_LSB_CH2, SHUNT_OHMS_CH2, AdcRange::Range0).await?;
-sensor.calibrate(Channel::Ch3, CURRENT_LSB_CH3, SHUNT_OHMS_CH3, AdcRange::Range1).await?;
-sensor.calibrate(Channel::Ch4, CURRENT_LSB_CH4, SHUNT_OHMS_CH4, AdcRange::Range0).await?;
+```rust
+# use ina4230::{AdcRange, Calibration, CurrentLsb, ShuntResistance};
+let cal = Calibration::new(
+    CurrentLsb::from_nanoamps(500_000)?,
+    ShuntResistance::from_microohms(8_000)?,
+    AdcRange::Range0,
+)?;
+assert_eq!(cal.shunt_cal().as_u16(), 1280); // datasheet §8.2.2.3
+# Ok::<(), ina4230::CalibrationError>(())
 ```
 
-Or use `calibrate_all()` to configure all four channels in one call:
+Building a `Calibration` is the only fallible step in configuring the device.
+It reports `ShuntCalOverflow` or `ShuntCalUnderflow` rather than silently
+clamping, and rejects a `SHUNT_CAL` of zero because the device then reports
+zero current indefinitely (datasheet §8.1.2).
 
-```rust,ignore
-sensor.calibrate_all([
-    (CURRENT_LSB_CH1, SHUNT_OHMS_CH1, AdcRange::Range0),
-    (CURRENT_LSB_CH2, SHUNT_OHMS_CH2, AdcRange::Range0),
-    (CURRENT_LSB_CH3, SHUNT_OHMS_CH3, AdcRange::Range1),
-    (CURRENT_LSB_CH4, SHUNT_OHMS_CH4, AdcRange::Range0),
-]).await?;
-```
+Call `calibrate()` before reading current, power, or energy. Bus voltage does
+not require it; shunt voltage does, because its scale depends on the ADC range.
+Each channel is independent, and `calibrate_all()` programs all four with a
+single `CONFIG2` update.
 
-The calibration register must be programmed after initial power up, power
-cycle events, or device enable to receive valid current, power, and energy
-results. Bus voltage and shunt voltage readings do not require calibration.
+Calibration must be reprogrammed after power-up, a power cycle, a device
+enable, or a `reset()`. `reset()` clears the driver's cached calibration to
+match, so a subsequent measurement fails with `NotCalibrated` rather than
+returning a confidently wrong number.
 
-### Channel Management
+### Channel management
 
-All four channels are active by default after power up. Unused channels can
-be disabled to reduce conversion time:
+All four channels are active after power-up. Unused channels can be disabled to
+shorten the conversion cycle:
 
 ```rust,ignore
 sensor.set_channel_active(Channel::Ch3, false).await?;
-sensor.set_channel_active(Channel::Ch4, false).await?;
 ```
 
-## Error Handling
+## Reading flags
 
-The driver returns `Ina4230Error` which covers both I²C bus errors and
-device-level conditions:
+`read_flags()` returns the whole `FLAGS` register:
+
+```rust,ignore
+let flags = sensor.read_flags().await?;
+if flags.math_overflow() {
+    warn!("current and power data may be invalid");
+}
+if flags.any_energy_overflow() {
+    warn!("energy accumulator overflowed");
+}
+```
+
+**This read is destructive.** Reading `FLAGS` clears the conversion-ready flag
+and the latched alert flags (datasheet Table 7-20). There is no way to poll one
+bit without consuming the others, which is why the API returns the whole
+register instead of offering per-bit accessors that would quietly discard the
+rest. If you poll for conversion completion in a loop, be aware that you are
+also discarding any overflow raised in the meantime.
+
+## Error handling
+
+`Ina4230Error` is small on purpose: overflow conditions are reported through
+`Flags`, not as errors, because an error can carry only one of them.
 
 ```rust,ignore
 match sensor.current(Channel::Ch1).await {
-    Ok(ma) => info!("Current: {} mA", ma),
-    Err(Ina4230Error::NotCalibrated) => error!("Call calibrate() first"),
-    Err(Ina4230Error::MathOverflow) => error!("Current exceeds full-scale range"),
-    Err(Ina4230Error::EnergyOverflow(ch)) => error!("Energy overflow on {:?}", ch),
+    Ok(i) => info!("{} mA", i.to_milliamps()),
+    Err(Ina4230Error::NotCalibrated(ch)) => error!("calibrate {:?} first", ch),
     Err(Ina4230Error::Bus(e)) => error!("I²C error: {:?}", e),
 }
 ```
 
-Use `check_flags()` to explicitly poll for overflow conditions:
+`NotCalibrated` is detected before any bus traffic is generated.
 
-```rust,ignore
-if let Err(e) = sensor.check_flags().await {
-    warn!("INA4230 flag: {:?}", e);
-}
+## I²C addresses
+
+The address is selected by the A0 and A1 pin strapping. `AddressPins` uses
+named fields because both are the same type and a transposed pair yields a
+valid-looking but wrong address:
+
+```rust
+# use ina4230::{AddrPinState, Address, AddressPins};
+let addr = Address::from_pins(AddressPins {
+    a0: AddrPinState::Gnd,
+    a1: AddrPinState::Sda,
+});
+assert_eq!(addr.as_u8(), 0x48);
 ```
 
-## I²C Addresses
+Datasheet Table 6-1 is a regular encoding, `0x40 | (A1 << 2) | A0`, with
+`GND = 0`, `VS = 1`, `SDA = 2`, `SCL = 3`:
 
-The I²C address is selected by the A0 and A1 pin strapping on the device.
-Pass two `AddrPinState` values to `Ina4230::new()` — the first for A0, the
-second for A1:
+| A1  | A0  | Address | A1  | A0  | Address |
+| --- | --- | ------- | --- | --- | ------- |
+| GND | GND | `0x40`  | SDA | GND | `0x48`  |
+| GND | VS  | `0x41`  | SDA | VS  | `0x49`  |
+| GND | SDA | `0x42`  | SDA | SDA | `0x4A`  |
+| GND | SCL | `0x43`  | SDA | SCL | `0x4B`  |
+| VS  | GND | `0x44`  | SCL | GND | `0x4C`  |
+| VS  | VS  | `0x45`  | SCL | VS  | `0x4D`  |
+| VS  | SDA | `0x46`  | SCL | SDA | `0x4E`  |
+| VS  | SCL | `0x47`  | SCL | SCL | `0x4F`  |
 
-```rust,ignore
-// A0=GND, A1=GND → address 0x40
-let sensor = Ina4230::new(i2c, AddrPinState::Gnd, AddrPinState::Gnd);
+Note the column order: A1 first, matching the datasheet.
 
-// A0=VS, A1=SDA → address 0x46
-let sensor = Ina4230::new(i2c, AddrPinState::Vs, AddrPinState::Sda);
-```
+## Not yet implemented
 
-All 16 address combinations (per datasheet Table 6-1):
+The following are described in `INA4230.ddsl` and reachable in the generated
+register layer, but have no high-level API yet:
 
-| A0  | A1  | Address |
-| --- | --- | ------- |
-| GND | GND | `0x40`  |
-| VS  | GND | `0x41`  |
-| GND | SDA | `0x42`  |
-| GND | SCL | `0x43`  |
-| GND | VS  | `0x44`  |
-| VS  | VS  | `0x45`  |
-| VS  | SDA | `0x46`  |
-| VS  | SCL | `0x47`  |
-| SDA | GND | `0x48`  |
-| SDA | VS  | `0x49`  |
-| SDA | SDA | `0x4A`  |
-| SDA | SCL | `0x4B`  |
-| SCL | GND | `0x4C`  |
-| SCL | VS  | `0x4D`  |
-| SCL | SDA | `0x4E`  |
-| SCL | SCL | `0x4F`  |
+- **Alert configuration** (`ALERT_CONFIG1..4`, addresses `0x07`, `0x0F`,
+  `0x17`, `0x1F`). Selects the alert function — shunt over/under limit, bus
+  over/under limit, power over limit — and the channel it applies to.
+  Encodings 6 and 7 are reserved, so the generated conversion is fallible.
+- **Alert limits** (`ALERT_LIMIT1..4`, addresses `0x06`, `0x0E`, `0x16`,
+  `0x1E`). The register format follows the alert function it is paired with:
+  signed for shunt limits, unsigned for bus and power. Making that
+  reinterpretation safe is the interesting part of the design, and the reason
+  it is not simply a `u16` setter.
+- **`CONFIG2` alert behaviour**: `CNVR_MASK`, `ENOF_MASK`, `ALERT_LATCH`, and
+  `ALERT_POL`.
+- **`CONFIG1` timing**: `AVG`, `VBUSCT`, and `VSHCT`. The power-on defaults
+  (1 sample, 1.1 ms conversion times, continuous shunt and bus) are used.
+- **Energy accumulator reset** (`CONFIG2.ACC_RST`), which also clears the
+  energy overflow flags.
+- **SMBus Alert Response** (address `0b0001100`) and **General Call reset**
+  (`0x00`, `0x06`), both supported by the device.
+
+The `FLAGS` register already exposes the four alert-limit bits via
+`Flags::limit_alerts()`, so alert conditions are observable even though they
+cannot yet be configured through this crate.
 
 ## Regenerating `src/device.rs`
 
 ```sh
 cargo install device-driver-cli
-device-driver-cli -m INA4230.toml -o generated.rs -d Device
-rustfmt --edition 2024 generated.rs
-cp generated.rs src/device.rs
+ddc build rust -s INA4230.ddsl -o src/device.rs --rust-defmt-feature=defmt
+rustfmt --edition 2024 src/device.rs
 ```
+
+CI verifies that the committed file matches the generator output.
 
 ## MSRV
 
-Rust `1.94` and up.
+Rust `1.88` and up.
 
 ## License
 
@@ -238,5 +293,3 @@ Licensed under the terms of the [MIT license](http://opensource.org/licenses/MIT
 Unless you explicitly state otherwise, any contribution submitted for
 inclusion in the work by you shall be licensed under the terms of the
 MIT license.
-
-License: MIT
