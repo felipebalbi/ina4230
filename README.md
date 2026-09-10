@@ -192,6 +192,32 @@ shorten the conversion cycle:
 sensor.set_channel_active(Channel::Ch3, false).await?;
 ```
 
+## Examples
+
+The `examples/` directory drives a real INA4230 from a host machine through a
+[Pico de Gallo](https://github.com/OpenDevicePartnership/pico-de-gallo) USB
+bridge, using `pico-de-gallo-hal` as the `embedded-hal-async` implementation.
+Each example documents its own wiring against the Pico de Gallo **v1.1** box
+header at the top of the file.
+
+| Example          | What it shows                                                        |
+| ---------------- | -------------------------------------------------------------------- |
+| `scan`           | Probe all 16 address strappings and identify what answered            |
+| `single_channel` | Calibrate one channel; read bus, shunt, current and power             |
+| `four_channel`   | Four independent shunts and current ranges via `calibrate_all`        |
+| `energy`         | Accumulate energy over time and interpret the `FLAGS` snapshot        |
+| `adc_range`      | `Range0` against `Range1` on the same shunt, and what resolution buys |
+
+```sh
+cargo run --example scan
+```
+
+Start with `scan`: it proves the wiring and the address before any measurement
+example can work. A common first mistake is leaving the `EN` pin floating, in
+which case the device is disabled and never acknowledges.
+
+These need hardware, so they are not run in CI — only compiled.
+
 ## Reading flags
 
 `read_flags()` returns the whole `FLAGS` register:
