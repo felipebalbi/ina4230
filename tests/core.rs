@@ -10,11 +10,11 @@
 
 use proptest::prelude::*;
 
-use crate::convert::{
+use ina4230::convert::{
     channel_bit, decode_bus_voltage, decode_current, decode_energy, decode_power, decode_shunt_voltage,
     set_channel_bit,
 };
-use crate::units::{
+use ina4230::units::{
     AdcRange, AddrPinState, Address, AddressPins, Calibration, CalibrationError, Channel, CurrentLsb,
     ShuntCal, ShuntResistance,
 };

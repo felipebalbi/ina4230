@@ -29,10 +29,15 @@ unsafe_code = "deny"
 missing_docs = "deny"
 
 [lints.clippy]
-correctness = "forbid"
-suspicious = "forbid"
-perf = "forbid"
-style = "forbid"
+# `deny` rather than `forbid`: `forbid` cannot be relaxed by an `allow`
+# anywhere in the crate, including inside code expanded from dependency
+# macros and inside the generated `device` module. rustc already warns that
+# such a conflict "will become a hard error in a future release". `deny` is
+# equally strict for our own code.
+correctness = "deny"
+suspicious = "deny"
+perf = "deny"
+style = "deny"
 pedantic = "deny"
 
 [features]
