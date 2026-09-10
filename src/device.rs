@@ -25,8 +25,11 @@ impl<I> Device<I> {
     }
     /// Per-channel register bank.
     ///
-    /// Datasheet Table 7-1: the eight per-channel registers are repeated four
-    /// times with a stride of 8, covering addresses 0x00 through 0x1F.
+    /// Datasheet Table 7-1: the eight per-channel register definitions are
+    /// repeated four times at register-pointer offsets 0x00, 0x08, 0x10 and
+    /// 0x18, covering pointer values 0x00 through 0x1F. The stride counts
+    /// register-pointer values, not bytes; the ENERGY register transfers four
+    /// bytes while every other register in the bank transfers two.
     ///
     /// Block operation:
     /// - Address: `0`
@@ -104,8 +107,11 @@ impl<I> ::device_driver::Block for Device<I> {
 }
 /// Per-channel register bank.
 ///
-/// Datasheet Table 7-1: the eight per-channel registers are repeated four
-/// times with a stride of 8, covering addresses 0x00 through 0x1F.
+/// Datasheet Table 7-1: the eight per-channel register definitions are
+/// repeated four times at register-pointer offsets 0x00, 0x08, 0x10 and
+/// 0x18, covering pointer values 0x00 through 0x1F. The stride counts
+/// register-pointer values, not bytes; the ENERGY register transfers four
+/// bytes while every other register in the bank transfers two.
 #[doc(alias = "channel-regs")]
 #[derive(Debug)]
 pub struct ChannelRegs<'i, I> {
@@ -208,8 +214,12 @@ impl<'i, I> ChannelRegs<'i, I> {
         let address = self.base_address + 5;
         ::device_driver::RegisterOperation::new(self, address as u8, || Calibration::from([0, 0]))
     }
-    /// Alert limit register. Format matches the corresponding result
-    /// register: shunt = signed 16-bit, bus = unsigned, power = unsigned.
+    /// Alert limit register.
+    ///
+    /// Datasheet §7.1.5: the format follows the result register the
+    /// selected alert function refers to. Shunt voltage limits are signed
+    /// 16-bit, bus voltage limits are unsigned 15-bit (bit 15 reserved),
+    /// and power limits are unsigned 16-bit.
     ///
     /// Register operation:
     /// - Address: `6`
@@ -277,16 +287,13 @@ impl AlertConfig {
     /// `2:0` - Read the `alert_mask` field.
     ///
     /// Active alert function selection.
-    ///
-    /// Encodings 6 and 7 are reserved and have no meaning, so the
-    /// conversion is fallible.
     #[doc(alias = "alert-mask")]
     #[must_use]
-    pub fn alert_mask(&self) -> Result<AlertFunction, <AlertFunction as TryFrom<u8>>::Error> {
+    pub fn alert_mask(&self) -> AlertFunction {
         let start = 0;
         let end = 2;
         let raw = unsafe { ::device_driver::ops::load::<u8, ::device_driver::ops::BE>(&self.bits, start, end) };
-        raw.try_into()
+        raw.into()
     }
     /// `4:3` - Set the `channel` field.
     ///
@@ -300,9 +307,6 @@ impl AlertConfig {
     /// `2:0` - Set the `alert_mask` field.
     ///
     /// Active alert function selection.
-    ///
-    /// Encodings 6 and 7 are reserved and have no meaning, so the
-    /// conversion is fallible.
     #[doc(alias = "alert-mask")]
     pub fn set_alert_mask(&mut self, value: AlertFunction) {
         let start = 0;
@@ -410,7 +414,8 @@ unsafe impl ::device_driver::Fieldset for AlertLimit {
 impl AlertLimit {
     /// `15:0` - Read the `limit` field.
     ///
-    /// Alert threshold.
+    /// Alert threshold, in the format of the corresponding result
+    /// register.
     #[must_use]
     pub fn limit(&self) -> u16 {
         let start = 0;
@@ -420,7 +425,8 @@ impl AlertLimit {
     }
     /// `15:0` - Set the `limit` field.
     ///
-    /// Alert threshold.
+    /// Alert threshold, in the format of the corresponding result
+    /// register.
     pub fn set_limit(&mut self, value: u16) {
         let start = 0;
         let end = 15;
@@ -2092,8 +2098,8 @@ impl core::ops::Not for Config1 {
 }
 /// Measurement channel selector.
 ///
-/// The four per-channel register banks are laid out contiguously with an
-/// 8-byte stride, so the channel index doubles as the repeat index for
+/// The four per-channel register banks occupy register-pointer values
+/// separated by 8, so the channel index doubles as the repeat index for
 /// the `channel-regs` block.
 #[doc(alias = "channel")]
 #[repr(u8)]
@@ -2142,13 +2148,22 @@ impl ::device_driver::EnumIndex for Channel {
         index.try_into().unwrap()
     }
 }
+/// Which condition asserts the ALERT pin.
+///
+/// Datasheet Table 7-8 documents encodings 0, 6 and 7 all
+/// as "reserved, no effect". They are aliases of one
+/// another rather than illegal states, and 0 is the
+/// power-on value, so all three decode to `no-effect`
+/// and the conversion is infallible.
 #[doc(alias = "alert-function")]
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum AlertFunction {
-    #[doc(alias = "none")]
-    None = 0,
+    /// Reserved, no effect. Encodings 6 and 7 behave
+    /// identically and collapse into this variant.
+    #[doc(alias = "no-effect")]
+    NoEffect = 0,
     #[doc(alias = "shunt-over-limit")]
     ShuntOverLimit = 1,
     #[doc(alias = "shunt-under-limit")]
@@ -2160,27 +2175,27 @@ pub enum AlertFunction {
     #[doc(alias = "power-over-limit")]
     PowerOverLimit = 5,
 }
-impl core::convert::TryFrom<u8> for AlertFunction {
-    type Error = ::device_driver::ConversionError<u8>;
-    fn try_from(val: u8) -> Result<Self, Self::Error> {
+impl Default for AlertFunction {
+    fn default() -> Self {
+        Self::NoEffect
+    }
+}
+impl From<u8> for AlertFunction {
+    fn from(val: u8) -> Self {
         match val {
-            0 => Ok(Self::None),
-            1 => Ok(Self::ShuntOverLimit),
-            2 => Ok(Self::ShuntUnderLimit),
-            3 => Ok(Self::BusOverLimit),
-            4 => Ok(Self::BusUnderLimit),
-            5 => Ok(Self::PowerOverLimit),
-            val => Err(::device_driver::ConversionError {
-                source: val,
-                target: "AlertFunction",
-            }),
+            1 => Self::ShuntOverLimit,
+            2 => Self::ShuntUnderLimit,
+            3 => Self::BusOverLimit,
+            4 => Self::BusUnderLimit,
+            5 => Self::PowerOverLimit,
+            _ => Self::default(),
         }
     }
 }
 impl From<AlertFunction> for u8 {
     fn from(val: AlertFunction) -> Self {
         match val {
-            AlertFunction::None => 0,
+            AlertFunction::NoEffect => 0,
             AlertFunction::ShuntOverLimit => 1,
             AlertFunction::ShuntUnderLimit => 2,
             AlertFunction::BusOverLimit => 3,

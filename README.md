@@ -10,9 +10,10 @@ The driver is split into a pure core and a thin shell.
 
 **`units` and `convert`** hold every physical quantity, the validated
 calibration inputs, and all the register decoding. They have no bus, no
-`async`, no HAL dependency, and no floating-point arithmetic, so they build and
-test on the host as readily as on the target. This is where the thinking lives,
-and where the tests are.
+`async`, and no HAL dependency. Calibration and decoding are integer
+arithmetic; floating point appears only in display-oriented `to_*` methods.
+These modules build and test on the host as readily as on the target. This is
+where the thinking lives, and where the tests are.
 
 **`Ina4230`** is the shell. Each method moves bytes to or from the device and
 hands them to a pure function. It contains no arithmetic.
@@ -28,9 +29,11 @@ the conversion from the raw register *exact*:
 | `Power`        | nW   | `to_milliwatts`, `to_watts`          |
 | `Energy`       | nJ   | `to_millijoules`, `to_joules`        |
 
-`f32` appears only in those `to_*` methods. They are for display; do arithmetic
-on the integer accessors (`as_nanovolts`, `as_microamps`, and friends), which
-are lossless.
+`f32` appears only in those `to_*` methods. They are for display. For
+arithmetic, use each type's base-unit accessor — `as_nanovolts`,
+`as_microvolts`, `as_nanoamps`, `as_nanowatts`, `as_nanojoules` — which are
+lossless. The coarser convenience accessors (`as_microamps`, `as_microwatts`,
+`as_microjoules`) divide and therefore truncate toward zero.
 
 ## Features
 
@@ -120,8 +123,9 @@ That is a floor, not a recommendation. Equation 2 divides by 2^15 = 32768 while
 the `CURRENT` register saturates at 32767, so the minimum lands about 0.003%
 below the requested full scale. The datasheet expects you to round up to a
 convenient number — its worked example takes a 305.17578 µA minimum for 10 A
-and uses 500 µA — and permits up to eight times the minimum before resolution
-suffers. Rounding up also closes the gap.
+and uses 500 µA — and requires the selected value to stay *strictly below*
+eight times the minimum to avoid losing resolution. Rounding up also closes the
+gap.
 
 ### ADC range
 
@@ -167,6 +171,18 @@ enable, or a `reset()`. `reset()` clears the driver's cached calibration to
 match, so a subsequent measurement fails with `NotCalibrated` rather than
 returning a confidently wrong number.
 
+The cache records only successful writes made through this driver. It cannot
+observe a power cycle, an EN-pin toggle, a General Call reset, or writes by
+another bus controller. After any of those, recalibrate the affected channels
+or construct a new driver before requesting scaled measurements.
+
+Calibration writes are also not atomic: `calibrate()` writes `CONFIG2.RANGE`
+and then `SHUNT_CAL`, and `calibrate_all()` writes `CONFIG2` once followed by
+four calibration registers. A bus error can leave the device partly programmed.
+Each cache entry is updated only after its own write succeeds, so on error
+either retry until it succeeds or inspect `calibration()` to see how far it
+got.
+
 ### Channel management
 
 All four channels are active after power-up. Unused channels can be disabled to
@@ -190,12 +206,17 @@ if flags.any_energy_overflow() {
 }
 ```
 
-**This read is destructive.** Reading `FLAGS` clears the conversion-ready flag
-and the latched alert flags (datasheet Table 7-20). There is no way to poll one
-bit without consuming the others, which is why the API returns the whole
-register instead of offering per-bit accessors that would quietly discard the
-rest. If you poll for conversion completion in a loop, be aware that you are
-also discarding any overflow raised in the meantime.
+**This read has side effects.** Reading `FLAGS` clears the conversion-ready
+flag and any latched alert flags (datasheet Table 7-20, and
+`CONFIG2.ALERT_LATCH`). There is no way to poll `CVRF` without reading the
+other flags at the same time, which is why the API returns the whole register
+instead of per-bit accessors that would discard the rest of the snapshot.
+
+The math-overflow and energy-overflow bits are not specified as read-to-clear;
+energy overflow is cleared through `CONFIG2.ACC_RST`. Those conditions persist
+in the device across reads. Latched alerts do not, so if alert information
+matters, inspect every `Flags` value a polling loop returns rather than only
+the last one.
 
 ## Error handling
 
@@ -245,26 +266,30 @@ Note the column order: A1 first, matching the datasheet.
 
 ## Not yet implemented
 
-The following are described in `INA4230.ddsl` and reachable in the generated
-register layer, but have no high-level API yet:
+The following register controls and device protocols are defined by
+`INA4230.ddsl` or the datasheet, but have no high-level API yet:
 
 - **Alert configuration** (`ALERT_CONFIG1..4`, addresses `0x07`, `0x0F`,
   `0x17`, `0x1F`). Selects the alert function — shunt over/under limit, bus
   over/under limit, power over limit — and the channel it applies to.
-  Encodings 6 and 7 are reserved, so the generated conversion is fallible.
+  Encodings 0, 6 and 7 are all documented as "reserved, no effect", so they
+  decode to a single `NoEffect` variant.
 - **Alert limits** (`ALERT_LIMIT1..4`, addresses `0x06`, `0x0E`, `0x16`,
-  `0x1E`). The register format follows the alert function it is paired with:
-  signed for shunt limits, unsigned for bus and power. Making that
-  reinterpretation safe is the interesting part of the design, and the reason
-  it is not simply a `u16` setter.
+  `0x1E`). The format follows the result register the selected alert function
+  refers to: signed 16-bit for shunt limits, unsigned 15-bit for bus limits
+  (bit 15 reserved), and unsigned 16-bit for power limits. Representing that
+  reinterpretation safely is the interesting part of the design, and the
+  reason these are not simply exposed as a `u16` setter.
 - **`CONFIG2` alert behaviour**: `CNVR_MASK`, `ENOF_MASK`, `ALERT_LATCH`, and
   `ALERT_POL`.
-- **`CONFIG1` timing**: `AVG`, `VBUSCT`, and `VSHCT`. The power-on defaults
-  (1 sample, 1.1 ms conversion times, continuous shunt and bus) are used.
+- **`CONFIG1` timing and operating mode**: `AVG`, `VBUSCT`, `VSHCT`, and
+  `MODE`. The power-on defaults are used: one sample, 1.1 ms bus and shunt
+  conversion times, and continuous shunt-and-bus conversion.
 - **Energy accumulator reset** (`CONFIG2.ACC_RST`), which also clears the
   energy overflow flags.
 - **`SMBus` Alert Response** (address `0b0001100`) and **General Call reset**
-  (`0x00`, `0x06`), both supported by the device.
+  (`0x00`, `0x06`). These are bus protocols rather than registers, so they are
+  not part of the generated register layer either.
 
 The `FLAGS` register already exposes the four alert-limit bits via
 `Flags::limit_alerts()`, so alert conditions are observable even though they

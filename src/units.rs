@@ -1,8 +1,11 @@
 //! Physical quantities and validated configuration values.
 //!
-//! Everything in this module is pure: no bus, no `async`, no HAL, no floating
-//! point. Values arrive as raw register words and leave as types that cannot
-//! be nonsensical, so the rest of the driver never has to re-check them.
+//! Everything in this module is pure: no bus, no `async`, no HAL. Values
+//! arrive as raw register words and leave as types that cannot be nonsensical,
+//! so the rest of the driver never has to re-check them.
+//!
+//! Calibration and every stored measurement use integer arithmetic. Floating
+//! point appears only in the display-oriented `to_*` methods.
 //!
 //! # Units
 //!
@@ -19,7 +22,11 @@
 //! | [`Energy`]       | nJ (`u64`) | 32 × `CURRENT_LSB`, accumulated      |
 //!
 //! Floating point appears only in the `to_*` rendering methods, which are for
-//! display and logging. Do arithmetic on the integer values, not the floats.
+//! display and logging. For arithmetic, prefer each type's base-unit accessor
+//! — `as_nanovolts`, `as_microvolts`, `as_nanoamps`, `as_nanowatts`,
+//! `as_nanojoules` — which are lossless. The coarser convenience accessors
+//! (`as_microamps`, `as_microwatts`, `as_microjoules`) divide and so truncate
+//! toward zero.
 
 use core::num::NonZeroU32;
 
@@ -203,8 +210,8 @@ pub enum CalibrationError {
 /// Current resolution, in nanoamperes per LSB of the `CURRENT` register.
 ///
 /// Datasheet Equation 2 gives the minimum useful value as
-/// `max_expected_current / 2^15`; the datasheet also recommends staying below
-/// eight times that minimum to avoid losing resolution.
+/// `max_expected_current / 2^15`; the selected value must also stay strictly
+/// below eight times that minimum to avoid losing resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct CurrentLsb(NonZeroU32);
@@ -247,9 +254,10 @@ impl CurrentLsb {
     /// so the value cross-checks against TI's worked example.
     ///
     /// The datasheet expects you to round up from here to a convenient number
-    /// — its example takes a 305.17578 µA minimum for 10 A and uses 500 µA —
-    /// and permits up to eight times the minimum before resolution suffers.
-    /// Rounding up also resolves the shortfall.
+    /// — its example takes a 305.17578 µA minimum for 10 A and uses 500 µA.
+    /// The selected value must stay *strictly below* eight times the minimum
+    /// to avoid losing resolution (datasheet §8.1.2). Rounding up also
+    /// resolves the shortfall.
     ///
     /// # Errors
     ///

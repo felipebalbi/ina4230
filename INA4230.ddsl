@@ -6,8 +6,8 @@ device Device {
 
     /// Measurement channel selector.
     ///
-    /// The four per-channel register banks are laid out contiguously with an
-    /// 8-byte stride, so the channel index doubles as the repeat index for
+    /// The four per-channel register banks occupy register-pointer values
+    /// separated by 8, so the channel index doubles as the repeat index for
     /// the `channel-regs` block.
     enum channel {
         ch-1: 0,
@@ -18,8 +18,11 @@ device Device {
 
     /// Per-channel register bank.
     ///
-    /// Datasheet Table 7-1: the eight per-channel registers are repeated four
-    /// times with a stride of 8, covering addresses 0x00 through 0x1F.
+    /// Datasheet Table 7-1: the eight per-channel register definitions are
+    /// repeated four times at register-pointer offsets 0x00, 0x08, 0x10 and
+    /// 0x18, covering pointer values 0x00 through 0x1F. The stride counts
+    /// register-pointer values, not bytes; the ENERGY register transfers four
+    /// bytes while every other register in the bank transfers two.
     block channel-regs[channel stride 8] {
         address-offset: 0,
 
@@ -94,15 +97,20 @@ device Device {
                 field shunt-cal 14:0,
             },
         },
-        /// Alert limit register. Format matches the corresponding result
-        /// register: shunt = signed 16-bit, bus = unsigned, power = unsigned.
+        /// Alert limit register.
+        ///
+        /// Datasheet §7.1.5: the format follows the result register the
+        /// selected alert function refers to. Shunt voltage limits are signed
+        /// 16-bit, bus voltage limits are unsigned 15-bit (bit 15 reserved),
+        /// and power limits are unsigned 16-bit.
         register alert-limit {
             address: 0x06,
             reset: 0x00,
             fields: fieldset _ {
                 size-bytes: 2,
 
-                /// Alert threshold.
+                /// Alert threshold, in the format of the corresponding result
+                /// register.
                 field limit 15:0,
             },
         },
@@ -121,17 +129,24 @@ device Device {
                     ch4: 3,
                 },
                 /// Active alert function selection.
-                ///
-                /// Encodings 6 and 7 are reserved and have no meaning, so the
-                /// conversion is fallible.
-                field alert-mask 2:0 -> _ as try enum alert-function {
-                    none: 0,
-                    shunt-over-limit: 1,
-                    shunt-under-limit: 2,
-                    bus-over-limit: 3,
-                    bus-under-limit: 4,
-                    power-over-limit: 5,
-                },
+                field alert-mask 2:0 -> _ as
+                    /// Which condition asserts the ALERT pin.
+                    ///
+                    /// Datasheet Table 7-8 documents encodings 0, 6 and 7 all
+                    /// as "reserved, no effect". They are aliases of one
+                    /// another rather than illegal states, and 0 is the
+                    /// power-on value, so all three decode to `no-effect`
+                    /// and the conversion is infallible.
+                    enum alert-function {
+                        /// Reserved, no effect. Encodings 6 and 7 behave
+                        /// identically and collapse into this variant.
+                        no-effect: default 0,
+                        shunt-over-limit: 1,
+                        shunt-under-limit: 2,
+                        bus-over-limit: 3,
+                        bus-under-limit: 4,
+                        power-over-limit: 5,
+                    },
             },
         },
     },

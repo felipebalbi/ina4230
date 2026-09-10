@@ -1,4 +1,4 @@
-# Verifies that src/device.rs stays in sync with the code generated from ina4230.toml.
+# Verifies that src/device.rs stays in sync with the code generated from INA4230.ddsl.
 permissions:
   contents: read
 on:

@@ -37,8 +37,11 @@ const LARGEST_REG_SIZE_BYTES: usize = 4;
 pub enum Ina4230Error<I2cError> {
     /// An error occurred on the I²C bus.
     Bus(I2cError),
-    /// A current, power, or energy reading was requested on a channel that has
-    /// not been calibrated.
+    /// A shunt-voltage, current, power, or energy reading was requested on a
+    /// channel that has not been calibrated.
+    ///
+    /// Shunt voltage is included because its scale depends on the channel's
+    /// configured [`AdcRange`], which is part of the calibration.
     ///
     /// Detected before any bus traffic is generated.
     NotCalibrated(Channel),
@@ -217,8 +220,11 @@ pub struct Ina4230<I2c: embedded_hal_async::i2c::I2c> {
     device: device::Device<DeviceInterface<I2c>>,
     /// The address this instance talks to, kept for introspection.
     address: Address,
-    /// Per-channel calibration. `None` means the channel is not calibrated,
-    /// and is the single source of truth for whether a reading can be scaled.
+    /// Per-channel calibration, as programmed through this driver.
+    ///
+    /// This is the driver's record of its own successful writes, not a
+    /// reflection of the device. It cannot observe a power cycle, an EN-pin
+    /// toggle, a General Call reset, or writes by another bus controller.
     calibration: [Option<Calibration>; 4],
 }
 
@@ -265,7 +271,11 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
     ///
     /// # Errors
     ///
-    /// Returns [`Ina4230Error::Bus`] if an I²C bus error occurs.
+    /// Returns [`Ina4230Error::Bus`] if an I²C bus error occurs. On a bus
+    /// error the device state is uncertain, because the write may have been
+    /// accepted before the error was reported. The cached calibration is
+    /// cleared only on success, so retry until `reset` succeeds rather than
+    /// relying on the cache after a failure.
     pub async fn reset(&mut self) -> Result<(), Ina4230Error<I2c::Error>> {
         self.device.config_2().write_async(|w| w.set_rst(true)).await?;
         self.calibration = [None; 4];
@@ -294,15 +304,21 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
     /// `"TI"` in ASCII.
     pub const MANUFACTURER_ID: u16 = 0x5449;
 
-    /// Read and clear the `FLAGS` register.
+    /// Read the `FLAGS` register.
     ///
-    /// # This read is destructive
+    /// # This read has side effects
     ///
-    /// Reading `FLAGS` clears the conversion-ready flag and the latched alert
-    /// flags (datasheet Table 7-20). There is no way to poll one bit without
-    /// consuming the others, which is why this returns the whole register
-    /// rather than offering per-bit accessors that would quietly discard the
-    /// rest.
+    /// Reading `FLAGS` clears the conversion-ready flag and any latched alert
+    /// flags (datasheet Table 7-20, and `CONFIG2.ALERT_LATCH`). There is no
+    /// way to poll `CVRF` without reading the other flags at the same time,
+    /// which is why this returns the whole register rather than offering
+    /// per-bit accessors that would discard the rest of the snapshot.
+    ///
+    /// The datasheet does not specify the math-overflow or energy-overflow
+    /// bits as read-to-clear; energy overflow is cleared through
+    /// `CONFIG2.ACC_RST`. Those conditions therefore persist in the device
+    /// across reads, but each returned [`Flags`] value is still the only
+    /// record the caller gets of that particular snapshot.
     ///
     /// To poll for conversion completion:
     ///
@@ -310,8 +326,9 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
     /// while !sensor.read_flags().await?.conversion_ready() {}
     /// ```
     ///
-    /// Note that this discards any overflow flags raised in the meantime; keep
-    /// the [`Flags`] value if you care about them.
+    /// Inspect every returned [`Flags`] if alert information matters: a
+    /// latched alert observed by an intermediate read of that loop is cleared
+    /// in the device and will not appear again.
     ///
     /// # Errors
     ///
@@ -327,6 +344,12 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
     }
 
     /// Enable or disable a channel in `CONFIG1.ACTIVE_CHANNEL`.
+    ///
+    /// Disabled channels are skipped in the round-robin conversion cycle.
+    ///
+    /// Note that writing `CONFIG1` clears the conversion-ready flag
+    /// (datasheet Table 7-20), so a poll in progress will wait for the next
+    /// full conversion.
     ///
     /// # Errors
     ///
@@ -353,6 +376,13 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
     /// # Errors
     ///
     /// Returns [`Ina4230Error::Bus`] if an I²C bus error occurs.
+    ///
+    /// This operation is not transactional: it writes `CONFIG2.RANGE` and then
+    /// `SHUNT_CAL`. A bus error can leave the range updated while the
+    /// calibration register is not, or either write accepted by the device
+    /// despite the error being reported. The cache is updated only after both
+    /// writes succeed, so on failure recalibrate the channel before trusting a
+    /// scaled reading.
     pub async fn calibrate(
         &mut self,
         channel: Channel,
@@ -385,6 +415,12 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
     /// # Errors
     ///
     /// Returns [`Ina4230Error::Bus`] if an I²C bus error occurs.
+    ///
+    /// This operation is not transactional. It writes `CONFIG2` once and then
+    /// each channel's `SHUNT_CAL` in turn, returning on the first failure, so
+    /// a bus error can leave a subset of channels programmed. Each channel's
+    /// cache entry is updated only after its own write succeeds; inspect
+    /// [`Ina4230::calibration`] to see how far it got.
     pub async fn calibrate_all(&mut self, calibrations: [Calibration; 4]) -> Result<(), Ina4230Error<I2c::Error>> {
         self.device
             .config_2()
@@ -409,7 +445,12 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
         Ok(())
     }
 
-    /// The calibration currently programmed for `channel`, if any.
+    /// The calibration this driver has cached for `channel`, if any.
+    ///
+    /// This reflects only successful writes made through this instance. It
+    /// cannot detect an external reset, a power cycle, an EN-pin toggle, or
+    /// writes performed by another bus controller. After any such event,
+    /// recalibrate before requesting scaled measurements.
     #[must_use]
     pub fn calibration(&self, channel: Channel) -> Option<Calibration> {
         self.calibration[channel.index()]

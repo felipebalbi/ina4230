@@ -1,15 +1,15 @@
 //! Conversions between raw register values and physical quantities.
 //!
-//! Every function here is pure and, with one deliberate exception, *total*:
-//! given a value of the input type it always produces an output, with no
-//! failure case and no panic. The exception is [`super::units::Calibration`],
-//! which parses caller-supplied calibration inputs and is the single fallible
-//! step in the driver.
+//! Every function in this module is pure and *total*: given a value of the
+//! input type it always produces an output, with no failure case and no panic.
+//! Caller-supplied calibration inputs are validated separately, by
+//! [`Calibration::new`], which is the single fallible step in configuring the
+//! driver.
 //!
 //! Because nothing here touches a bus, these functions are testable by walking
-//! their entire input domain on the host. `decode_bus_voltage` has 65,536
-//! inputs; `decode_shunt_voltage` has 131,072. Both are exhausted in the test
-//! suite in well under a millisecond.
+//! their entire input domain on the host. [`decode_bus_voltage`] has 65,536
+//! inputs; [`decode_shunt_voltage`] has 131,072. Both are exhausted in the
+//! test suite in well under a millisecond.
 
 use crate::units::{AdcRange, BusVoltage, Calibration, Channel, Current, Energy, Power, ShuntVoltage};
 
