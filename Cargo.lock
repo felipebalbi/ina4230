@@ -416,6 +416,7 @@ version = "0.1.0"
 dependencies = [
  "defmt",
  "device-driver",
+ "embedded-hal 1.0.0",
  "embedded-hal-async",
  "embedded-hal-mock",
  "embedded-sensors-hal-async",

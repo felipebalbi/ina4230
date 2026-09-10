@@ -266,20 +266,31 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
     /// make the driver confidently scale readings with settings the device no
     /// longer has.
     ///
-    /// Call [`Ina4230::calibrate`] again before reading current, power, or
-    /// energy.
+    /// Call [`Ina4230::calibrate`] again before reading shunt voltage, current,
+    /// power, or energy.
+    ///
+    /// # The cache is cleared before the write, not after
+    ///
+    /// I²C gives no way to learn whether a device acted on a transaction that
+    /// failed partway, and a future dropped at an `await` point may still have
+    /// put the write on the wire. Both cases would leave a reset device paired
+    /// with a stale cache, and because a reset zeroes `SHUNT_CAL` the part then
+    /// reports a current of exactly zero (datasheet §8.1.2) — a plausible
+    /// reading rather than an obvious fault.
+    ///
+    /// Clearing first makes the cache never outlive the device's calibration.
+    /// The cost of clearing unnecessarily is one redundant calibration; the
+    /// cost of not clearing is silently wrong measurements.
     ///
     /// # Errors
     ///
-    /// Returns [`Ina4230Error::Bus`] if an I²C bus error occurs. On a bus
-    /// error the device state is uncertain, because the write may have been
-    /// accepted before the error was reported. The cached calibration is
-    /// cleared only on success, so retry until `reset` succeeds rather than
-    /// relying on the cache after a failure.
+    /// Returns [`Ina4230Error::Bus`] if an I²C bus error occurs. The cache is
+    /// cleared either way, so a failed reset always leaves the driver in the
+    /// loud [`Ina4230Error::NotCalibrated`] state rather than a quiet wrong
+    /// one.
     pub async fn reset(&mut self) -> Result<(), Ina4230Error<I2c::Error>> {
-        self.device.config_2().write_async(|w| w.set_rst(true)).await?;
         self.calibration = [None; 4];
-        Ok(())
+        self.device.config_2().write_async(|w| w.set_rst(true)).await
     }
 
     /// Read the manufacturer ID register.
@@ -378,16 +389,22 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
     /// Returns [`Ina4230Error::Bus`] if an I²C bus error occurs.
     ///
     /// This operation is not transactional: it writes `CONFIG2.RANGE` and then
-    /// `SHUNT_CAL`. A bus error can leave the range updated while the
-    /// calibration register is not, or either write accepted by the device
-    /// despite the error being reported. The cache is updated only after both
-    /// writes succeed, so on failure recalibrate the channel before trusting a
-    /// scaled reading.
+    /// `SHUNT_CAL`. A bus error, or a dropped future, can leave the range
+    /// updated while the calibration register is not. The channel's cache
+    /// entry is therefore invalidated *before* the first write and only
+    /// repopulated once both succeed, so a partial update surfaces as
+    /// [`Ina4230Error::NotCalibrated`] rather than as readings scaled with a
+    /// range the device no longer uses — which for the two ADC ranges would be
+    /// a silent factor-of-four error.
     pub async fn calibrate(
         &mut self,
         channel: Channel,
         calibration: Calibration,
     ) -> Result<(), Ina4230Error<I2c::Error>> {
+        // Invalidate first: from here until both writes land, the device's
+        // calibration state is not something this driver can vouch for.
+        self.calibration[channel.index()] = None;
+
         self.device
             .config_2()
             .modify_async(|w| {
@@ -416,12 +433,20 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
     ///
     /// Returns [`Ina4230Error::Bus`] if an I²C bus error occurs.
     ///
-    /// This operation is not transactional. It writes `CONFIG2` once and then
-    /// each channel's `SHUNT_CAL` in turn, returning on the first failure, so
-    /// a bus error can leave a subset of channels programmed. Each channel's
-    /// cache entry is updated only after its own write succeeds; inspect
-    /// [`Ina4230::calibration`] to see how far it got.
+    /// This operation is not transactional. It writes `CONFIG2` once — setting
+    /// all four range bits together — and then each channel's `SHUNT_CAL` in
+    /// turn, returning on the first failure. Every cache entry is therefore
+    /// invalidated before the `CONFIG2` write, and each channel is repopulated
+    /// only once its own `SHUNT_CAL` lands. A partial update leaves the
+    /// channels it did not reach reporting
+    /// [`Ina4230Error::NotCalibrated`]; inspect [`Ina4230::calibration`] to see
+    /// how far it got.
     pub async fn calibrate_all(&mut self, calibrations: [Calibration; 4]) -> Result<(), Ina4230Error<I2c::Error>> {
+        // The CONFIG2 write moves all four range bits at once, so every
+        // channel's cached calibration is suspect from here until its own
+        // SHUNT_CAL is back in place.
+        self.calibration = [None; 4];
+
         self.device
             .config_2()
             .modify_async(|w| {

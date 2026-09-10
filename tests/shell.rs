@@ -6,6 +6,7 @@
 //! the right channel, and that the driver's cached state stays consistent with
 //! the device.
 
+use embedded_hal::i2c::ErrorKind;
 use embedded_hal_mock::eh1::i2c::{Mock, Transaction};
 
 use ina4230::{
@@ -183,6 +184,128 @@ async fn reset_discards_cached_calibration() {
     assert_eq!(
         dev.current(Channel::Ch1).await,
         Err(Ina4230Error::NotCalibrated(Channel::Ch1))
+    );
+    dev.release().done();
+}
+
+// ── State after a failed write ────────────────────────────────────────────────
+//
+// I2C cannot tell you whether a device acted on a transaction that failed
+// partway through, so after any failure the device's calibration state is
+// unknown. The driver resolves that ambiguity towards a loud NotCalibrated
+// rather than a quiet wrong number.
+
+#[tokio::test]
+async fn reset_clears_cache_even_when_the_write_fails() {
+    // The device may well have reset before reporting the error. Keeping the
+    // cache would leave the driver scaling against a SHUNT_CAL of zero, which
+    // makes the part report exactly 0 A: a plausible reading, not an obvious
+    // fault.
+    let expectations = vec![
+        Transaction::write_read(ADDR, vec![0x21], vec![0x00, 0x00]),
+        Transaction::write(ADDR, vec![0x21, 0x00, 0x00]),
+        Transaction::write(ADDR, vec![0x05, 0x05, 0x00]),
+        Transaction::write(ADDR, vec![0x21, 0x80, 0x00]).with_error(ErrorKind::Other),
+    ];
+    let mut dev = sensor(&expectations);
+
+    dev.calibrate(Channel::Ch1, example_cal()).await.unwrap();
+    assert!(dev.calibration(Channel::Ch1).is_some());
+
+    assert!(dev.reset().await.is_err());
+
+    assert_eq!(dev.calibration(Channel::Ch1), None);
+    assert_eq!(
+        dev.current(Channel::Ch1).await,
+        Err(Ina4230Error::NotCalibrated(Channel::Ch1))
+    );
+    dev.release().done();
+}
+
+#[tokio::test]
+async fn calibrate_invalidates_the_channel_when_shunt_cal_fails() {
+    // CONFIG2.RANGE lands but SHUNT_CAL does not. Retaining the previous
+    // calibration would pair the device's new range with the cache's old one,
+    // and the two ADC ranges differ by a factor of four.
+    let range1_cal = Calibration::new(
+        CurrentLsb::from_nanoamps(500_000).unwrap(),
+        ShuntResistance::from_microohms(8_000).unwrap(),
+        AdcRange::Range1,
+    )
+    .unwrap();
+
+    let expectations = vec![
+        // first calibration, Range0, succeeds
+        Transaction::write_read(ADDR, vec![0x21], vec![0x00, 0x00]),
+        Transaction::write(ADDR, vec![0x21, 0x00, 0x00]),
+        Transaction::write(ADDR, vec![0x05, 0x05, 0x00]),
+        // second calibration, Range1: the range write lands...
+        Transaction::write_read(ADDR, vec![0x21], vec![0x00, 0x00]),
+        Transaction::write(ADDR, vec![0x21, 0x00, 0x01]),
+        // ...and SHUNT_CAL (1280 / 4 = 320 = 0x0140) fails
+        Transaction::write(ADDR, vec![0x05, 0x01, 0x40]).with_error(ErrorKind::Other),
+    ];
+    let mut dev = sensor(&expectations);
+
+    dev.calibrate(Channel::Ch1, example_cal()).await.unwrap();
+    assert_eq!(dev.calibration(Channel::Ch1), Some(example_cal()));
+
+    assert!(dev.calibrate(Channel::Ch1, range1_cal).await.is_err());
+
+    // Not the old Range0 calibration, and not the new one either.
+    assert_eq!(dev.calibration(Channel::Ch1), None);
+    assert_eq!(
+        dev.shunt_voltage(Channel::Ch1).await,
+        Err(Ina4230Error::NotCalibrated(Channel::Ch1))
+    );
+    dev.release().done();
+}
+
+#[tokio::test]
+async fn calibrate_all_invalidates_the_channels_it_did_not_reach() {
+    // CONFIG2 moves all four range bits together, so a failure partway through
+    // the SHUNT_CAL writes leaves the remaining channels with a device range
+    // the cache knows nothing about.
+    //
+    // The hazard is specifically a *stale* entry surviving, so this calibrates
+    // successfully first and then fails a second pass: channels 3 and 4 must
+    // end up invalidated rather than holding their earlier values.
+    let cal = example_cal();
+    let expectations = vec![
+        // first pass: all four succeed
+        Transaction::write_read(ADDR, vec![0x21], vec![0x00, 0x00]),
+        Transaction::write(ADDR, vec![0x21, 0x00, 0x00]),
+        Transaction::write(ADDR, vec![0x05, 0x05, 0x00]),
+        Transaction::write(ADDR, vec![0x0D, 0x05, 0x00]),
+        Transaction::write(ADDR, vec![0x15, 0x05, 0x00]),
+        Transaction::write(ADDR, vec![0x1D, 0x05, 0x00]),
+        // second pass: CONFIG2 and channels 1-2 land, channel 3 fails,
+        // channel 4 is never attempted
+        Transaction::write_read(ADDR, vec![0x21], vec![0x00, 0x00]),
+        Transaction::write(ADDR, vec![0x21, 0x00, 0x00]),
+        Transaction::write(ADDR, vec![0x05, 0x05, 0x00]),
+        Transaction::write(ADDR, vec![0x0D, 0x05, 0x00]),
+        Transaction::write(ADDR, vec![0x15, 0x05, 0x00]).with_error(ErrorKind::Other),
+    ];
+    let mut dev = sensor(&expectations);
+
+    dev.calibrate_all([cal; 4]).await.unwrap();
+    for ch in Channel::ALL {
+        assert_eq!(dev.calibration(ch), Some(cal));
+    }
+
+    assert!(dev.calibrate_all([cal; 4]).await.is_err());
+
+    // The two that completed are usable; the two that did not must have been
+    // invalidated, not left holding the first pass's values.
+    assert_eq!(dev.calibration(Channel::Ch1), Some(cal));
+    assert_eq!(dev.calibration(Channel::Ch2), Some(cal));
+    assert_eq!(dev.calibration(Channel::Ch3), None);
+    assert_eq!(dev.calibration(Channel::Ch4), None);
+
+    assert_eq!(
+        dev.current(Channel::Ch3).await,
+        Err(Ina4230Error::NotCalibrated(Channel::Ch3))
     );
     dev.release().done();
 }
