@@ -171,6 +171,16 @@ impl Channel {
             Channel::Ch4 => 0b1000,
         }
     }
+
+    /// Map to the generated repeat index for the per-channel register block.
+    fn to_device(self) -> device::Channel {
+        match self {
+            Channel::Ch1 => device::Channel::Ch1,
+            Channel::Ch2 => device::Channel::Ch2,
+            Channel::Ch3 => device::Channel::Ch3,
+            Channel::Ch4 => device::Channel::Ch4,
+        }
+    }
 }
 
 // ── ADC Range ─────────────────────────────────────────────────────────────────
@@ -418,32 +428,11 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
 
         // Write the calibration register
         let cal = Self::shunt_cal_value(current_lsb_a, shunt_ohms, adc_range);
-        match channel {
-            Channel::Ch1 => {
-                self.device
-                    .calibration_ch_1()
-                    .write_async(|w| w.set_shunt_cal(cal))
-                    .await
-            }
-            Channel::Ch2 => {
-                self.device
-                    .calibration_ch_2()
-                    .write_async(|w| w.set_shunt_cal(cal))
-                    .await
-            }
-            Channel::Ch3 => {
-                self.device
-                    .calibration_ch_3()
-                    .write_async(|w| w.set_shunt_cal(cal))
-                    .await
-            }
-            Channel::Ch4 => {
-                self.device
-                    .calibration_ch_4()
-                    .write_async(|w| w.set_shunt_cal(cal))
-                    .await
-            }
-        }
+        self.device
+            .channel_regs(channel.to_device())
+            .calibration()
+            .write_async(|w| w.set_shunt_cal(cal))
+            .await
     }
 
     /// Write the calibration register for all four channels.
@@ -482,21 +471,17 @@ impl<I2c: embedded_hal_async::i2c::I2c> Ina4230<I2c> {
         f32::from(raw) * 1.6
     }
 
-    #[allow(clippy::cast_possible_wrap)]
-    fn shunt_mv(&self, channel: Channel, raw: u16) -> MilliVolts {
-        let signed = raw as i16;
+    fn shunt_mv(&self, channel: Channel, raw: i16) -> MilliVolts {
         let lsb_mv = match self.adc_range[channel as usize] {
             AdcRange::Range0 => 0.0025,    // 2.5 µV
             AdcRange::Range1 => 0.000_625, // 625 nV
         };
-        f32::from(signed) * lsb_mv
+        f32::from(raw) * lsb_mv
     }
 
-    #[allow(clippy::cast_possible_wrap)]
-    fn current_ma(&self, channel: Channel, raw: u16) -> Result<MilliAmps, Ina4230Error<I2c::Error>> {
+    fn current_ma(&self, channel: Channel, raw: i16) -> Result<MilliAmps, Ina4230Error<I2c::Error>> {
         let lsb = self.current_lsb_a[channel as usize].ok_or(Ina4230Error::NotCalibrated)?;
-        let signed = raw as i16;
-        Ok(f32::from(signed) * lsb * 1000.0)
+        Ok(f32::from(raw) * lsb * 1000.0)
     }
 
     fn power_mw(&self, channel: Channel, raw: u16) -> Result<MilliWatts, Ina4230Error<I2c::Error>> {
@@ -519,58 +504,63 @@ impl<I2c: embedded_hal_async::i2c::I2c> sensor::ErrorType for Ina4230<I2c> {
 
 impl<I2c: embedded_hal_async::i2c::I2c> VoltageSensor for Ina4230<I2c> {
     async fn bus_voltage(&mut self, channel: Channel) -> Result<MilliVolts, Self::Error> {
-        let raw = match channel {
-            Channel::Ch1 => self.device.bus_voltage_ch_1().read_async().await?.vbus(),
-            Channel::Ch2 => self.device.bus_voltage_ch_2().read_async().await?.vbus(),
-            Channel::Ch3 => self.device.bus_voltage_ch_3().read_async().await?.vbus(),
-            Channel::Ch4 => self.device.bus_voltage_ch_4().read_async().await?.vbus(),
-        };
+        let raw = self
+            .device
+            .channel_regs(channel.to_device())
+            .bus_voltage()
+            .read_async()
+            .await?
+            .vbus();
         Ok(Self::bus_mv(raw))
     }
 
     async fn shunt_voltage(&mut self, channel: Channel) -> Result<MilliVolts, Self::Error> {
-        let raw = match channel {
-            Channel::Ch1 => self.device.shunt_voltage_ch_1().read_async().await?.vshunt(),
-            Channel::Ch2 => self.device.shunt_voltage_ch_2().read_async().await?.vshunt(),
-            Channel::Ch3 => self.device.shunt_voltage_ch_3().read_async().await?.vshunt(),
-            Channel::Ch4 => self.device.shunt_voltage_ch_4().read_async().await?.vshunt(),
-        };
+        let raw = self
+            .device
+            .channel_regs(channel.to_device())
+            .shunt_voltage()
+            .read_async()
+            .await?
+            .vshunt();
         Ok(self.shunt_mv(channel, raw))
     }
 }
 
 impl<I2c: embedded_hal_async::i2c::I2c> CurrentSensor for Ina4230<I2c> {
     async fn current(&mut self, channel: Channel) -> Result<MilliAmps, Self::Error> {
-        let raw = match channel {
-            Channel::Ch1 => self.device.current_ch_1().read_async().await?.current(),
-            Channel::Ch2 => self.device.current_ch_2().read_async().await?.current(),
-            Channel::Ch3 => self.device.current_ch_3().read_async().await?.current(),
-            Channel::Ch4 => self.device.current_ch_4().read_async().await?.current(),
-        };
+        let raw = self
+            .device
+            .channel_regs(channel.to_device())
+            .current()
+            .read_async()
+            .await?
+            .current();
         self.current_ma(channel, raw)
     }
 }
 
 impl<I2c: embedded_hal_async::i2c::I2c> PowerSensor for Ina4230<I2c> {
     async fn power(&mut self, channel: Channel) -> Result<MilliWatts, Self::Error> {
-        let raw = match channel {
-            Channel::Ch1 => self.device.power_ch_1().read_async().await?.power(),
-            Channel::Ch2 => self.device.power_ch_2().read_async().await?.power(),
-            Channel::Ch3 => self.device.power_ch_3().read_async().await?.power(),
-            Channel::Ch4 => self.device.power_ch_4().read_async().await?.power(),
-        };
+        let raw = self
+            .device
+            .channel_regs(channel.to_device())
+            .power()
+            .read_async()
+            .await?
+            .power();
         self.power_mw(channel, raw)
     }
 }
 
 impl<I2c: embedded_hal_async::i2c::I2c> EnergySensor for Ina4230<I2c> {
     async fn energy(&mut self, channel: Channel) -> Result<MilliJoules, Self::Error> {
-        let raw = match channel {
-            Channel::Ch1 => self.device.energy_ch_1().read_async().await?.energy(),
-            Channel::Ch2 => self.device.energy_ch_2().read_async().await?.energy(),
-            Channel::Ch3 => self.device.energy_ch_3().read_async().await?.energy(),
-            Channel::Ch4 => self.device.energy_ch_4().read_async().await?.energy(),
-        };
+        let raw = self
+            .device
+            .channel_regs(channel.to_device())
+            .energy()
+            .read_async()
+            .await?
+            .energy();
         self.energy_mj(channel, raw)
     }
 }
@@ -617,7 +607,8 @@ mod tests {
             i2c,
             address: (AddrPinState::Gnd, AddrPinState::Gnd).to_address(),
         });
-        dev.calibration_ch_1()
+        dev.channel_regs(device::Channel::Ch1)
+            .calibration()
             .write_async(|w| w.set_shunt_cal(cal))
             .await
             .unwrap();
