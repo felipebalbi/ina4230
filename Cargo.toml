@@ -8,9 +8,10 @@ readme = "README.md"
 keywords = ["TI", "power-monitor", "energy", "driver", "embedded-hal-driver"]
 categories = ["embedded", "hardware-support", "no-std"]
 documentation = "https://docs.rs/ina4230"
-include = ["/**/*.rs", "/Cargo.toml", "/README.md", "/LICENSE", "/INA4230.toml"]
+include = ["/**/*.rs", "/Cargo.toml", "/README.md", "/LICENSE", "/INA4230.ddsl"]
 edition = "2024"
-rust-version = "1.88"
+# Bounded by device-driver 2.1, which requires 1.94.
+rust-version = "1.94"
 
 [dependencies]
 device-driver = "2.1.0"
@@ -19,8 +20,18 @@ embedded-hal-async = "1.0.0"
 embedded-sensors-hal-async = "0.4.0"
 
 [dev-dependencies]
+# Needed to name `i2c::ErrorKind` when injecting bus failures into the mock.
+embedded-hal = "1.0.0"
 embedded-hal-mock = { version = "0.11.1", features = ["embedded-hal-async"] }
-tokio = { version = "=1.45.0", features = ["rt", "macros"] }
+# Host-side embedded-hal-async implementation, used by the examples in
+# `examples/` to drive a real INA4230 over a Pico de Gallo USB bridge. Not
+# needed to build the driver itself.
+pico-de-gallo-hal = "0.7.0"
+proptest = "1.6"
+# The examples run the async driver on a multi-threaded runtime: inside tokio,
+# pico-de-gallo-hal uses `block_in_place`, which panics on a current-thread
+# runtime.
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros"] }
 
 
 [lints.rust]
@@ -28,10 +39,15 @@ unsafe_code = "deny"
 missing_docs = "deny"
 
 [lints.clippy]
-correctness = "forbid"
-suspicious = "forbid"
-perf = "forbid"
-style = "forbid"
+# `deny` rather than `forbid`: `forbid` cannot be relaxed by an `allow`
+# anywhere in the crate, including inside code expanded from dependency
+# macros and inside the generated `device` module. rustc already warns that
+# such a conflict "will become a hard error in a future release". `deny` is
+# equally strict for our own code.
+correctness = "deny"
+suspicious = "deny"
+perf = "deny"
+style = "deny"
 pedantic = "deny"
 
 [features]
