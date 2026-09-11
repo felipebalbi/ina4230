@@ -22,6 +22,7 @@ pull request so that the project team can discuss the situation with you.
 ## Releases
 
 * Releases are automated. Do not edit `version` in `Cargo.toml`, do not write `CHANGELOG.md` entries by hand, and do not push tags — release-plz owns all three.
+* **Temporarily not true for the version bump and changelog.** The job that opens the release pull request is disabled, because a repository ruleset forbids the branch it needs. Those two edits are made by hand in a normal pull request until that is resolved; see the comment above `release-plz-pr` in `.github/workflows/release-plz.yml`. Publishing and tagging remain automated.
 
 ## PR Etiquette
 

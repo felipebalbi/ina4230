@@ -49,6 +49,10 @@ Releases are fully automated by `release-plz` (see `release-plz.toml` and `.gith
 
 You **must not** edit `version` in `Cargo.toml`, write `CHANGELOG.md` entries by hand, or push tags. Those are release-plz's outputs, and hand-editing them desynchronises the tool from the registry.
 
+> **Current status — step 1 is switched off.** The `release-pr` job is gated off in `.github/workflows/release-plz.yml`. The "Disable Branch Creation" repository ruleset refuses the `release-plz-<timestamp>` branch that release-plz needs in order to open its pull request, so the job could only ever fail. Until an administrator excludes `refs/heads/release-plz-*` from that ruleset, the version bump and the `CHANGELOG.md` entry have to be prepared by hand in an ordinary pull request. That is the sole exception to the paragraph above, and it disappears the moment the job is re-enabled.
+>
+> Step 2 is unaffected. Once `main` carries a version that crates.io does not have, the `release` job publishes it, pushes the tag, and cuts the GitHub release. Tags are `refs/tags/*` and fall outside the ruleset.
+
 ## AI Attribution
 Every commit that includes AI-generated or AI-assisted work **must** contain an `Assisted-by` trailer in the commit message:
 ```
