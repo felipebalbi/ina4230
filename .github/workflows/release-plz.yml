@@ -76,10 +76,40 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Open or update the release pull request preparing the next version.
+  #
+  # DISABLED -- this job cannot succeed in this repository as configured.
+  #
+  # `release-plz release-pr` opens its pull request from a branch it creates
+  # here, `release-plz-<timestamp>`. The repository ruleset "Disable Branch
+  # Creation" (id 15423648) is active, targets `refs/heads/*`, carries a
+  # `creation` rule, and lists no bypass actors, so branch creation is refused
+  # for every actor. The API call fails with:
+  #
+  #     POST /repos/OpenDevicePartnership/ina4230/git/refs -> 422
+  #     Reference update failed
+  #
+  # This is not a token scope problem. Granting `contents: write` does not
+  # help, because rulesets are evaluated after permissions -- which is why
+  # GitHub's own error text says "Write permissions alone do not bypass
+  # repository rulesets".
+  #
+  # To re-enable: a repository or organisation administrator adds
+  # `refs/heads/release-plz-*` to the ruleset's `conditions.ref_name.exclude`
+  # list, then the guard below is restored to
+  #
+  #     if: ${{ github.repository_owner == 'OpenDevicePartnership' }}
+  #
+  # The "Branch Protection" ruleset (id 15423642) still requires two approving
+  # reviews and a code owner review, so the release pull request remains a
+  # deliberate, human-approved step even once this job runs again.
+  #
+  # The `release` job above is unaffected. It publishes whatever version `main`
+  # already carries and pushes the tag; tags are `refs/tags/*` and fall outside
+  # this ruleset's `branch` target.
   release-plz-pr:
     runs-on: ubuntu-latest
     name: release-pr
-    if: ${{ github.repository_owner == 'OpenDevicePartnership' }}
+    if: false
 
     permissions:
       # Push to the release pull request branch.
